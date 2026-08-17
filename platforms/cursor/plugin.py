@@ -10,6 +10,7 @@ class CursorPlatform(BasePlatform):
     name = "cursor"
     display_name = "Cursor"
     version = "1.0.0"
+    supported_executors = ["protocol", "headless", "headed"]
 
     def __init__(self, config: RegisterConfig = None, mailbox: BaseMailbox = None):
         super().__init__(config)
@@ -17,13 +18,11 @@ class CursorPlatform(BasePlatform):
 
     def register(self, email: str, password: str = None) -> Account:
         log = getattr(self, '_log_fn', print)
-        proxy = self.config.proxy
-        yescaptcha_key = self.config.extra.get("yescaptcha_key", "")
-
-        reg = CursorRegister(proxy=proxy, log_fn=log)
-
+        extra = self.config.extra or {}
         mail_acct = self.mailbox.get_email() if self.mailbox else None
         email = email or (mail_acct.email if mail_acct else None)
+        if not email:
+            raise RuntimeError("邮箱服务未返回邮箱地址")
         before_ids = self.mailbox.get_current_ids(mail_acct) if mail_acct else set()
         otp_timeout = self.get_mailbox_otp_timeout()
 
@@ -38,12 +37,47 @@ class CursorPlatform(BasePlatform):
             if code: log(f"验证码: {code}")
             return code
 
-        result = reg.register(
-            email=email,
-            password=password,
-            otp_callback=otp_cb if self.mailbox else None,
-            yescaptcha_key=yescaptcha_key,
-        )
+        # 与 Grok 保持一致：可通过 *_registration_mode 选择 protocol/browser，
+        # executor_type 决定浏览器 headless/headed。Cursor 默认走浏览器，
+        # 因为 AuthKit 需要页面生成 signFingerprint signals。
+        registration_mode = str(
+            extra.get("cursor_registration_mode") or "browser"
+        ).strip().lower()
+        if registration_mode in {"browser", "playwright", "headless", "headed"}:
+            from platforms.cursor.browser import CursorBrowserRegister
+
+            def _extra_bool(name: str, default: bool = False) -> bool:
+                value = extra.get(name)
+                if value in (None, ""):
+                    return default
+                return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+            log(f"使用浏览器模式注册: {email}")
+            result = CursorBrowserRegister(
+                mailbox=self.mailbox,
+                proxy=self.config.proxy,
+                log_fn=log,
+                headless=(self.config.executor_type or "") == "headless",
+                profile_dir=extra.get("cursor_browser_profile_dir") or None,
+                human_timeout_seconds=extra.get(
+                    "cursor_browser_timeout_seconds", 180
+                ),
+                http_bootstrap=_extra_bool("cursor_http_bootstrap"),
+            ).register(
+                email=email,
+                password=password or "",
+                otp_callback=otp_cb if self.mailbox else None,
+                otp_timeout=otp_timeout,
+            )
+        else:
+            yescaptcha_key = extra.get("yescaptcha_key", "")
+            reg = CursorRegister(proxy=self.config.proxy, log_fn=log)
+            result = reg.register(
+                email=email,
+                password=password,
+                otp_callback=otp_cb if self.mailbox else None,
+                yescaptcha_key=yescaptcha_key,
+            )
 
         return Account(
             platform="cursor",

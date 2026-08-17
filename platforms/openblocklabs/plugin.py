@@ -10,7 +10,7 @@ class OpenBlockLabsPlatform(BasePlatform):
     name = "openblocklabs"
     display_name = "OpenBlockLabs"
     version = "1.0.0"
-    supported_executors = ["protocol"]
+    supported_executors = ["protocol", "headless", "headed"]
 
     def __init__(self, config: RegisterConfig = None, mailbox: BaseMailbox = None):
         super().__init__(config)
@@ -26,6 +26,43 @@ class OpenBlockLabsPlatform(BasePlatform):
         log(f"邮箱: {email}")
         before_ids = self.mailbox.get_current_ids(mail_acct) if mail_acct else set()
         otp_timeout = self.get_mailbox_otp_timeout()
+
+        extra = self.config.extra or {}
+        registration_mode = str(
+            extra.get("openblocklabs_registration_mode") or "browser"
+        ).strip().lower()
+        if registration_mode in {"browser", "playwright", "headless", "headed"}:
+            if not self.mailbox or not mail_acct:
+                raise RuntimeError("OpenBlockLabs 注册需要可读取验证邮件的邮箱服务")
+
+            from platforms.openblocklabs.browser import OpenBlockLabsBrowserRegister
+
+            log(f"使用浏览器模式注册: {email}")
+            result = OpenBlockLabsBrowserRegister(
+                mailbox=self.mailbox,
+                proxy=proxy,
+                log_fn=log,
+                # protocol 保留为有头浏览器，便于人工完成 Cloudflare 真人验证；
+                # 只有明确选择 headless 时才使用无头模式。
+                headless=(self.config.executor_type or "") == "headless",
+                human_timeout_seconds=extra.get(
+                    "openblocklabs_browser_timeout_seconds", 180
+                ),
+            ).register(
+                email=email,
+                password=password,
+                mail_acct=mail_acct,
+                before_ids=before_ids,
+                otp_timeout=otp_timeout,
+            )
+            return Account(
+                platform="openblocklabs",
+                email=result["email"],
+                password=result["password"],
+                status=AccountStatus.REGISTERED,
+                extra={"wos_session": result.get("wos_session", "")},
+                token=result.get("wos_session", ""),
+            )
 
         def otp_cb():
             log("等待验证码...")

@@ -58,7 +58,9 @@ class AccountModel(SQLModel, table=True):
     password: str
     user_id: str = ""
     region: str = ""
-    token: str = ""
+    # WorkOS/OpenBlockLabs 的 wos-session 可能超过传统 VARCHAR(255)；
+    # 使用 Text，避免注册成功后在保存账号阶段被数据库截断。
+    token: str = Field(default="", sa_column=Column(Text))
     status: str = "registered"
     trial_end_time: int = 0
     cashier_url: str = ""
@@ -137,6 +139,27 @@ def save_account(account) -> 'AccountModel':
 
 def init_db():
     SQLModel.metadata.create_all(engine)
+    _migrate_account_token_column()
+
+
+def _migrate_account_token_column() -> None:
+    """将旧数据库中的 accounts.token 扩容为 TEXT。
+
+    create_all 不会修改已有表结构，而现有部署可能已经用 VARCHAR(255)
+    建表，因此在启动时对 MySQL/MariaDB 做一次幂等迁移。SQLite 的 TEXT
+    亲和类型不受 VARCHAR 长度限制，无需改表。
+    """
+    if engine.dialect.name != "mysql":
+        return
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "ALTER TABLE accounts MODIFY COLUMN token TEXT NOT NULL"
+            )
+    except Exception as exc:
+        # 某些托管数据库账号没有 ALTER 权限；保留启动能力，但把原因明确
+        # 输出，避免后续出现难以定位的“注册成功但保存失败”。
+        print(f"[WARN] accounts.token 扩容迁移失败: {exc}")
 
 
 def get_session():

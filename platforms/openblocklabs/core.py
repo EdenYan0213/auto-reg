@@ -16,7 +16,7 @@ pip install curl_cffi requests
 """
 
 import re, json, time, base64, random, string, os
-from urllib.parse import urlencode, urlparse, parse_qs
+from urllib.parse import urlencode, urlparse, parse_qs, quote, urljoin
 from curl_cffi import requests as curl_requests
 import requests as std_requests
 from core.proxy_utils import build_requests_proxy_config
@@ -32,7 +32,7 @@ CLIENT_ID = "client_01K8YDZSSKDMK8GYTEHBAW4N4S"
 UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/145.0.0.0 Safari/537.36"
+    "Chrome/131.0.0.0 Safari/537.36"
 )
 
 
@@ -112,6 +112,7 @@ class OpenBlockLabsRegister:
         )
         self.authorization_session_id = None
         self._action_id = None
+        self._session_token = ""
 
     def log(self, msg):
         print(f"[REG] {msg}")
@@ -120,7 +121,7 @@ class OpenBlockLabsRegister:
         h = {
             "accept": accept
             or "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "sec-ch-ua": '"Not:A-Brand";v="99", "Google Chrome";v="145", "Chromium";v="145"',
+            "sec-ch-ua": '"Not:A-Brand";v="99", "Google Chrome";v="131", "Chromium";v="131"',
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"macOS"',
         }
@@ -129,12 +130,34 @@ class OpenBlockLabsRegister:
         return h
 
     def _extract_action_id(self, text: str) -> str:
-        m = re.search(r'\\?"id\\?":\\?"([a-f0-9]{40})\\?"', text)
-        return m.group(1) if m else None
+        # WorkOS/Next 部署后 Action id 会变化；当前页面已出现 42 位 id，
+        # 旧的 {40} 匹配会得到 None，随后 POST /sign-up 直接返回 400。
+        patterns = (
+            r'\\?"id\\?":\\?"([a-f0-9]{40,64})\\?"\\?,\\?"bound\\?":',
+            r'(?<![0-9a-f])([a-f0-9]{40,64})(?![0-9a-f])',
+        )
+        for pattern in patterns:
+            match = re.search(pattern, str(text or ""), re.IGNORECASE)
+            if match:
+                return match.group(1)
+        return None
 
     def _post_action(self, url: str, fields: list, router_state: str):
-        all_fields = fields + [("0", '["$K1"]')]
-        body, ct = _build_multipart(all_fields)
+        # Next 当前的 multipart Server Action 字段名是 ``_1_email``。旧实现
+        # 少了开头的下划线，线上会返回 ``invalid_params``；保留旧调用点的
+        # ``1_`` 写法，在这里统一转换，并补上 action 的 0 字段。
+        normalized = []
+        has_zero = False
+        for name, value in fields:
+            name = str(name)
+            if name == "0":
+                has_zero = True
+            if name.startswith("1_"):
+                name = "_" + name
+            normalized.append((name, value))
+        if not has_zero:
+            normalized.append(("0", '["$K1"]'))
+        body, ct = _build_multipart(normalized)
         return self.s.post(
             url,
             data=body,
@@ -151,6 +174,56 @@ class OpenBlockLabsRegister:
             },
             allow_redirects=False,
         )
+
+    @staticmethod
+    def _router_state_tree(path: str) -> str:
+        """生成当前 AuthKit 使用的 Next router state tree。"""
+        segments = [part for part in str(path or "").split("/") if part]
+        node = ["__PAGE__", {}, None, None, 0]
+        for segment in reversed(segments):
+            node = [segment, {"children": node}, None, None, 0]
+        route = [
+            "",
+            {
+                "children": [
+                    "(main)",
+                    {"children": ["(root)", {"children": node}, None, None, 0]},
+                    None,
+                    None,
+                    0,
+                ]
+            },
+            None,
+            None,
+            16,
+        ]
+        return quote(json.dumps(route, separators=(",", ":")), safe="()")
+
+    @staticmethod
+    def _action_redirect(response) -> str:
+        for header_name in ("x-action-redirect", "location"):
+            value = str(response.headers.get(header_name, "") or "").strip()
+            if value:
+                return value
+        body = str(response.text or "")
+        match = re.search(
+            r"(?:replace|push|redirect);(https?://[^;\\s\"]+|/[^;\\s\"]+)",
+            body,
+            re.IGNORECASE,
+        )
+        return match.group(1) if match else ""
+
+    @classmethod
+    def _action_succeeded(cls, response, expected_path: str) -> bool:
+        if response.status_code == 303:
+            return True
+        if response.status_code >= 400:
+            return False
+        redirect = cls._action_redirect(response)
+        body = re.sub(r"\\s+", " ", str(response.text or ""))
+        if expected_path in redirect or expected_path in body:
+            return True
+        return not re.search(r'"(?:code|error)"\s*:\s*"(?:invalid_params|invalid_action)', body)
 
     def step1_initiate_signup(self) -> bool:
         """GET auth.openblocklabs.com/sign-up → authorization_session_id + action ID"""
@@ -196,16 +269,15 @@ class OpenBlockLabsRegister:
                 "authorization_session_id": self.authorization_session_id,
             }
         )
-        router_state = (
-            "%5B%22%22%2C%7B%22children%22%3A%5B%22%28main%29%22%2C%7B%22children%22%3A%5B%22%28root%29%22%2C"
-            "%7B%22children%22%3A%5B%22sign-up%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2Cnull%2Cnull%5D"
-            "%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%2Ctrue%5D"
-        )
+        router_state = self._router_state_tree("sign-up")
         resp = self._post_action(
             url,
             [
                 ("1_browser_supports_passkeys", "true"),
-                ("1_signals", ""),
+                # 当前 AuthKit 会在首个注册提交时校验 signals；空值会返回
+                # digest 形式的 HTTP 500。协议模式没有 DOM 可以读取，复用
+                # 后续密码步骤使用的结构化信号作为兼容回退。
+                ("1_signals", _make_signals()),
                 ("1_first_name", first_name),
                 ("1_last_name", last_name),
                 ("1_email", email),
@@ -216,7 +288,7 @@ class OpenBlockLabsRegister:
             router_state,
         )
         self.log(f"  -> {resp.status_code}")
-        return resp.status_code == 303
+        return self._action_succeeded(resp, "/sign-up/password")
 
     def step4_get_password_page(self) -> bool:
         """GET /sign-up/password → 提取 next-action ID"""
@@ -250,12 +322,7 @@ class OpenBlockLabsRegister:
                 "authorization_session_id": self.authorization_session_id,
             }
         )
-        router_state = (
-            "%5B%22%22%2C%7B%22children%22%3A%5B%22%28main%29%22%2C%7B%22children%22%3A%5B%22%28root%29%22%2C"
-            "%7B%22children%22%3A%5B%22sign-up%22%2C%7B%22children%22%3A%5B%22password%22%2C%7B%22children%22%3A"
-            "%5B%22__PAGE__%22%2C%7B%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D"
-            "%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%2Ctrue%5D"
-        )
+        router_state = self._router_state_tree("sign-up/password")
         resp = self._post_action(
             url,
             [
@@ -303,7 +370,7 @@ class OpenBlockLabsRegister:
 
     def step7_submit_otp(self, email: str, code: str, pending_auth_token: str) -> str:
         """POST /email-verification → 303 → dashboard/auth/callback?code=..."""
-        self.log(f"Step7: POST /email-verification code={code}")
+        self.log("Step7: POST /email-verification")
         url = f"{AUTH_BASE}/email-verification?" + urlencode(
             {
                 "redirect_uri": DASHBOARD_CALLBACK,
@@ -318,36 +385,48 @@ class OpenBlockLabsRegister:
         ]
         if pending_auth_token:
             fields.append(("1_pending_authentication_token", pending_auth_token))
-        fields.append(("0", '["$K1"]'))
-        body, ct = _build_multipart(fields)
-        resp = self.s.post(
+        resp = self._post_action(
             url,
-            data=body,
-            headers={
-                "accept": "text/x-component",
-                "content-type": ct,
-                "origin": AUTH_BASE,
-                "referer": url,
-                "next-action": self._action_id,
-                "next-router-state-tree": "%5B%22%22%2C%7B%22children%22%3A%5B%22%28main%29%22%2C%7B%22children%22%3A%5B%22%28root%29%22%2C%7B%22children%22%3A%5B%22%28fixed-layout%29%22%2C%7B%22children%22%3A%5B%22email-verification%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%2Ctrue%5D",
-                "sec-fetch-dest": "empty",
-                "sec-fetch-mode": "cors",
-                "sec-fetch-site": "same-origin",
-            },
-            allow_redirects=False,
+            fields,
+            self._router_state_tree("(fixed-layout)/email-verification"),
         )
         self.log(f"  -> {resp.status_code}")
-        redirect = resp.headers.get("x-action-redirect", "")
-        self.log(f"  x-action-redirect: {redirect[:120]}")
+        redirect = self._action_redirect(resp)
+        redirect_target = redirect.split(";", 1)[0].strip()
+        self.log(
+            f"  x-action-redirect: {'present' if redirect_target else 'none'}"
+        )
         if not redirect:
             self.log(f"  body[:400]: {resp.text[:400]}")
-        m = re.search(r"code=([^&]+)", redirect)
-        auth_code = m.group(1) if m else None
-        self.log(f"  auth_code={auth_code}")
+        auth_code = None
+        if redirect_target:
+            callback_url = urljoin(url, redirect_target)
+            callback_response = self.s.get(
+                callback_url,
+                headers=self._get_headers(referer=url),
+                allow_redirects=True,
+            )
+            self._session_token = next(
+                (
+                    str(cookie.value)
+                    for cookie in self.s.cookies.jar
+                    if cookie.name == "wos-session" and cookie.value
+                ),
+                "",
+            )
+            final_url = str(callback_response.url or callback_url)
+            auth_code = parse_qs(urlparse(final_url).query).get("code", [None])[0]
+            self.log(
+                f"  success redirect followed: HTTP {callback_response.status_code}, "
+                f"session={'present' if self._session_token else 'missing'}"
+            )
+        self.log(f"  auth_code={'present' if auth_code else 'missing'}")
         return auth_code
 
     def step8_exchange_callback(self, auth_code: str) -> str:
         """GET dashboard/auth/callback?code=... → wos-session cookie"""
+        if self._session_token:
+            return self._session_token
         self.log("Step8: GET /auth/callback")
         url = f"{DASHBOARD_CALLBACK}?code={auth_code}"
         r = self.s.get(
@@ -419,7 +498,7 @@ class OpenBlockLabsRegister:
         if not auth_code:
             return {"success": False, "error": "submit_otp failed / no auth_code"}
 
-        session_token = self.step8_exchange_callback(auth_code)
+        session_token = self._session_token or self.step8_exchange_callback(auth_code)
         if not session_token:
             return {
                 "success": False,

@@ -1,4 +1,5 @@
 """Tavily 注册协议核心实现 (Auth0 流程)"""
+import html
 import re, json, secrets, hashlib, base64, urllib.parse
 from typing import Optional, Callable
 
@@ -6,7 +7,8 @@ AUTH0_CLIENT_ID   = "RRIAvvXNFxpfTWIozX1mXqLnyUmYSTrQ"
 AUTH0_BASE        = "https://auth.tavily.com"
 APP_BASE          = "https://app.tavily.com"
 REDIRECT_URI      = "https://app.tavily.com/api/auth/callback"
-TURNSTILE_SITEKEY = "0x4AAAAAAAQFNSW6xordsuIq"
+# Auth0 会在注册页动态下发 sitekey，不能长期硬编码。
+TURNSTILE_SITEKEY = ""
 
 
 class TavilyRegister:
@@ -14,6 +16,21 @@ class TavilyRegister:
         self.ex = executor
         self.captcha = captcha
         self.log = log_fn
+        self.signup_url = ""
+        self.turnstile_sitekey = ""
+
+    @staticmethod
+    def _extract_sitekey(text: str) -> str:
+        patterns = (
+            r'data-captcha-sitekey=["\']([^"\']+)',
+            r'["\']sitekey["\']\s*[:=]\s*["\']([^"\']+)',
+            r'0x4[A-Za-z0-9_-]{20,}',
+        )
+        for pattern in patterns:
+            match = re.search(pattern, str(text or ""), re.IGNORECASE)
+            if match:
+                return match.group(1) if match.lastindex else match.group(0)
+        return ""
 
     def step1_authorize(self) -> str:
         """GET /authorize → 返回 state"""
@@ -33,12 +50,31 @@ class TavilyRegister:
             "code_challenge_method": "S256",
         }
         r = self.ex.get(f"{AUTH0_BASE}/authorize", params=params)
-        m = re.search(r'[?&]state=([^&]+)', r.headers.get("location", "") or str(r.text[:500]))
-        return urllib.parse.unquote(m.group(1)) if m else state_val
+        location = r.headers.get("location", "") or ""
+        m = re.search(r'[?&]state=([^&]+)', location)
+        state = urllib.parse.unquote(m.group(1)) if m else state_val
+
+        # ProtocolExecutor 会跟随 Auth0 重定向，当前响应通常就是 identifier
+        # 页面。用最终页面中的 state/sitekey 建立后续请求契约。
+        page_text = str(r.text or "")
+        state_input = re.search(
+            r'<input[^>]+name=["\']state["\'][^>]+value=["\']([^"\']+)',
+            page_text,
+            re.IGNORECASE,
+        )
+        if state_input:
+            state = html.unescape(state_input.group(1))
+        self.turnstile_sitekey = self._extract_sitekey(page_text)
+        self.signup_url = f"{AUTH0_BASE}/u/signup/identifier?state={urllib.parse.quote(state, safe='')}"
+        if not self.turnstile_sitekey:
+            raise RuntimeError("Tavily 注册页未返回 Turnstile sitekey")
+        return state
 
     def step2_solve_captcha(self) -> str:
         self.log("获取 Turnstile token...")
-        token = self.captcha.solve_turnstile(AUTH0_BASE, TURNSTILE_SITEKEY)
+        if not self.signup_url or not self.turnstile_sitekey:
+            raise RuntimeError("Tavily 注册上下文不完整，无法获取 Turnstile 参数")
+        token = self.captcha.solve_turnstile(self.signup_url, self.turnstile_sitekey)
         self.log("Turnstile OK")
         return token
 
