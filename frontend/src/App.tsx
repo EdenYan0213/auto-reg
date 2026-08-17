@@ -47,7 +47,6 @@ function AppContent() {
     fetch('/api/platforms')
       .then(r => r.json())
       .then(d => setPlatforms((d || [])
-        .filter((p: any) => p.name !== 'tavily')
         .map((p: any) => ({ key: p.name, label: p.display_name }))))
   }, [])
 

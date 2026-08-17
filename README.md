@@ -92,6 +92,8 @@ This project is a third-generation fork based on the following outstanding open-
 | **Tavily** | ✅ | ❌ | ❌ | |
 | **OpenBlockLabs** | ✅ | ❌ | ❌ | |
 
+> **Cursor / Tavily registration note**: The Cursor and Tavily registration plugins are still available and can be selected on the Register Task page. They were missing from the Platform Management sidebar because the old backend `/api/platforms` endpoint and the frontend navigation incorrectly filtered them out; registration itself was not removed. The management page now shows both Cursor and Tavily. Tavily registration does not support the LuckMail mailbox provider, so choose another available mailbox service.
+
 ---
 
 ## 🛠️ Tech Stack

@@ -94,6 +94,8 @@
 | **Tavily** | ✅ | ❌ | ❌ | |
 | **OpenBlockLabs** | ✅ | ❌ | ❌ | |
 
+> **Cursor / Tavily 注册说明**：Cursor 和 Tavily 的注册插件仍然保留，可以在“注册任务”页面选择并注册。它们之前没有出现在“平台管理”侧栏，是因为旧版后端 `/api/platforms` 和前端导航错误地过滤了这两个平台，并不代表注册功能已移除。现在管理页面会正常显示 Cursor 和 Tavily。Tavily 注册不支持 LuckMail 邮箱渠道，请改用其他可用邮箱服务。
+
 ---
 
 ## 🛠️ 技术栈
