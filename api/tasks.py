@@ -187,8 +187,12 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
                         if merged_extra.get("luckmail_base_url"):
                             account.extra.setdefault("luckmail_base_url", merged_extra.get("luckmail_base_url"))
                 saved_account = save_account(account)
+                if saved_account is None:
+                    raise RuntimeError(f"注册成功但账号保存失败: {account.email}")
                 if _proxy: proxy_pool.report_success(_proxy)
-                _log(task_id, f"[OK] 注册成功: {account.email}")
+                saved_id = getattr(saved_account, "id", "") or ""
+                suffix = f" (ID={saved_id})" if saved_id else ""
+                _log(task_id, f"[OK] 注册成功并已保存: {account.email}{suffix}")
                 _save_task_log(req.platform, account.email, "success")
                 _auto_upload_integrations(task_id, saved_account or account)
                 cashier_url = (account.extra or {}).get("cashier_url", "")

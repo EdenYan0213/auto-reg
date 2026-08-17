@@ -53,6 +53,18 @@ def _get_admin_credentials(api_url: str | None, username: str | None, password: 
 
 def _extract_sso(account) -> str:
     extra = getattr(account, "extra", {}) or {}
+    if not extra and hasattr(account, "get_extra"):
+        try:
+            extra = account.get_extra() or {}
+        except Exception:
+            extra = {}
+    if not extra:
+        raw_extra = getattr(account, "extra_json", "") or ""
+        if raw_extra:
+            try:
+                extra = json.loads(raw_extra) or {}
+            except (TypeError, ValueError):
+                extra = {}
     token = (
         extra.get("sso")
         or extra.get("sso_token")

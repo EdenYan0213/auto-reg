@@ -27,6 +27,9 @@ grok_account.txt
 frontend/node_modules/
 frontend/dist/
 
+# Grok 协议运行时依赖
+node_modules/
+
 # Electron
 electron/node_modules/
 electron/dist/

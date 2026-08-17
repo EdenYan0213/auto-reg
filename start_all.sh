@@ -71,6 +71,10 @@ stop_service() {
 AUTO_REG_CMD="env PORT=8010 HOST=0.0.0.0 .venv/bin/python main.py"
 KIRO_GW_CMD=".venv/bin/python main.py"
 
+# Grok 协议注册使用参考项目的真实页面 Turnstile solver。
+REFERENCE_ROOT="$ROOT/../gptGrok2api"
+GROK_SOLVER_CMD=".venv/bin/python captcha-solver/server.py"
+
 # _ext_targets 位于 auto_reg 的上级目录（PycharmProjects/_ext_targets）
 EXT_ROOT="$ROOT/../_ext_targets"
 GROK2API_BIN="$EXT_ROOT/grok2api/bin/grok2api"
@@ -79,17 +83,24 @@ GROK2API_CMD="$GROK2API_BIN --config $EXT_ROOT/grok2api/config.yaml"
 if [ "${1:-}" = "stop" ]; then
   stop_service "auto_reg"     8010
   stop_service "kiro-gateway" 8766
+  stop_service "gptGrok2api Turnstile Solver" 8877
   stop_service "grok2api"     8011
   info "全部服务已停止"
   exit 0
 fi
 
 echo "================================================================"
-echo " 一键启动：auto_reg + kiro-gateway + grok2api"
+echo " 一键启动：auto_reg + kiro-gateway + Grok Turnstile Solver + grok2api"
 echo "================================================================"
 
 launch "auto_reg"     "$AUTO_REG_CMD"     "http://127.0.0.1:8010/"    "$LOG_DIR/auto_reg.log"     "$ROOT" 8010
 launch "kiro-gateway" "$KIRO_GW_CMD"      "http://127.0.0.1:8766/health" "$LOG_DIR/kiro-gateway.log" "$ROOT/research/kiro/kiro-gateway" 8766
+
+if [ -f "$REFERENCE_ROOT/captcha-solver/server.py" ] && [ -x "$REFERENCE_ROOT/.venv/bin/python" ]; then
+  launch "gptGrok2api Turnstile Solver" "$GROK_SOLVER_CMD" "http://127.0.0.1:8877/health" "$LOG_DIR/grok_solver.log" "$REFERENCE_ROOT" 8877
+else
+  warn "未找到 gptGrok2api 的 8877 solver，Grok 协议注册需要手动启动它"
+fi
 
 if [ ! -x "$GROK2API_BIN" ]; then
   warn "grok2api 二进制不存在，尝试编译..."
@@ -114,6 +125,9 @@ check() {
 }
 check "auto_reg 管理端"      "http://127.0.0.1:8010"      8010
 check "kiro-gateway API 文档" "http://127.0.0.1:8766/docs"  8766
+if [ -f "$REFERENCE_ROOT/captcha-solver/server.py" ]; then
+  check "Grok Turnstile Solver" "http://127.0.0.1:8877/health" 8877
+fi
 check "grok2api 管理端"      "http://127.0.0.1:8011/admin" 8011
 echo
 echo "日志目录: $LOG_DIR"
