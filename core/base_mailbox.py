@@ -499,7 +499,7 @@ class TempMailLolMailbox(BaseMailbox):
             raise RuntimeError(f"tempmail.lol API 返回空邮箱: {data}")
         self._email = email
         self._token = data.get("token", "")
-        print(f"[TempMailLol] 生成邮箱: {self._email}")
+        self._log(f"[TempMailLol] 生成邮箱: {self._email}")
         return MailboxAccount(email=self._email, account_id=self._token)
 
     def get_current_ids(self, account: MailboxAccount) -> set:
@@ -808,7 +808,7 @@ class DuckMailMailbox(BaseMailbox):
             "https://", ""
         )
         address = f"{username}@{domain}"
-        print(f"[DuckMail] 创建账号: {address} direct={self._direct}")
+        self._log(f"[DuckMail] 创建账号: {address} direct={self._direct}")
         # 创建账号
         r = self._request(
             "POST", "/accounts", json={"address": address, "password": password}
@@ -1808,7 +1808,7 @@ class CFWorkerMailbox(BaseMailbox):
                 f"CFWorker API /admin/new_address 返回缺少 email/jwt: {data}"
             )
         self._token = token
-        print(
+        self._log(
             f"[CFWorker] 生成邮箱: {email} token={token[:40] if token else 'NONE'}..."
         )
         return MailboxAccount(
@@ -1944,13 +1944,13 @@ class MoeMailMailbox(BaseMailbox):
         # 注册
         username = "".join(random.choices(string.ascii_lowercase + string.digits, k=12))
         password = "Test" + "".join(random.choices(string.digits, k=8)) + "!"
-        print(f"[MoeMail] 注册账号: {username} / {password}")
+        self._log(f"[MoeMail] 注册账号: {username}")
         r_reg = s.post(
             f"{self.api}/api/auth/register",
             json={"username": username, "password": password, "turnstileToken": ""},
             timeout=15,
         )
-        print(f"[MoeMail] 注册结果: {r_reg.status_code} {r_reg.text[:80]}")
+        self._log(f"[MoeMail] 注册结果: {r_reg.status_code} {r_reg.text[:80]}")
         # 获取 CSRF
         csrf_r = s.get(f"{self.api}/api/auth/csrf", timeout=10)
         csrf = csrf_r.json().get("csrfToken", "")
@@ -1966,9 +1966,9 @@ class MoeMailMailbox(BaseMailbox):
         for cookie in s.cookies:
             if "session-token" in cookie.name:
                 self._session_token = cookie.value
-                print(f"[MoeMail] 登录成功")
+                self._log(f"[MoeMail] 登录成功")
                 return cookie.value
-        print(f"[MoeMail] 登录失败，cookies: {[c.name for c in s.cookies]}")
+        self._log(f"[MoeMail] 登录失败，cookies: {[c.name for c in s.cookies]}")
         return ""
 
     def get_email(self) -> MailboxAccount:
@@ -2002,11 +2002,11 @@ class MoeMailMailbox(BaseMailbox):
         data = r.json()
         self._email = data.get("email", data.get("address", ""))
         email_id = data.get("id", "")
-        print(
+        self._log(
             f"[MoeMail] 生成邮箱: {self._email} id={email_id} domain={domain} status={r.status_code}"
         )
         if not email_id:
-            print(f"[MoeMail] 生成失败: {data}")
+            self._log(f"[MoeMail] 生成失败: {data}")
         if email_id:
             self._email_count = getattr(self, "_email_count", 0) + 1
         return MailboxAccount(email=self._email, account_id=str(email_id))
@@ -2433,7 +2433,7 @@ class FreemailMailbox(BaseMailbox):
         data = r.json()
         email = data.get("email", "")
         self._email = email
-        print(f"[Freemail] 生成邮箱: {email}")
+        self._log(f"[Freemail] 生成邮箱: {email}")
         return MailboxAccount(email=email, account_id=email)
 
     def get_current_ids(self, account: MailboxAccount) -> set:

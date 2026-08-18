@@ -5,6 +5,7 @@ from sqlmodel import Session, select
 from typing import Optional
 from core.db import TaskLog, engine
 import time, json, asyncio, threading, logging
+from datetime import datetime, timezone
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 logger = logging.getLogger(__name__)
@@ -61,7 +62,7 @@ def _log(task_id: str, msg: str):
     with _tasks_lock:
         if task_id in _tasks:
             _tasks[task_id].setdefault("logs", []).append(entry)
-    print(entry)
+    logger.info(entry)
 
 
 def _save_task_log(platform: str, email: str, status: str,
@@ -121,10 +122,12 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
 
         def _do_one(i: int):
             nonlocal next_start_time
+            _platform = None
+            _attempt_email = str(req.email or "").strip()
+            _proxy = req.proxy
             try:
                 from core.proxy_pool import proxy_pool
 
-                _proxy = req.proxy
                 if not _proxy:
                     _proxy = proxy_pool.get_next()
                 # 延迟控制
@@ -204,7 +207,18 @@ def _run_register(task_id: str, req: RegisterTaskRequest):
             except Exception as e:
                 if _proxy: proxy_pool.report_fail(_proxy)
                 _log(task_id, f"[FAIL] 注册失败: {e}")
-                _save_task_log(req.platform, req.email or "", "failed", error=str(e))
+                failure_email = str(
+                    getattr(_platform, "last_registration_email", "")
+                    or _attempt_email
+                    or ""
+                ).strip()
+                _save_task_log(
+                    req.platform,
+                    failure_email,
+                    "failed",
+                    error=str(e),
+                    detail={"registration_email": failure_email} if failure_email else {},
+                )
                 return str(e)
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -348,10 +362,7 @@ def run_scheduled_task_now(task_id: str, background_tasks: BackgroundTasks):
     """立即执行定时任务"""
     from core.scheduler import get_scheduled_register_tasks, update_task_run_status
     from api.tasks import _run_register, _log
-    import logging
-    
-    logger = logging.getLogger(__name__)
-    
+
     tasks = get_scheduled_register_tasks()
     if task_id not in tasks:
         raise HTTPException(404, "任务不存在")
@@ -383,23 +394,8 @@ def run_scheduled_task_now(task_id: str, background_tasks: BackgroundTasks):
             logger.error(f"任务 {run_task_id} 运行失败：{error_msg}")
     
     background_tasks.add_task(run_with_status)
-    
-    return {"task_id": run_task_id, "status": "running"}
 
-@router.post("/schedule/{task_id}/toggle")
-def toggle_scheduled_task(task_id: str):
-    """暂停或恢复定时任务"""
-    from core.scheduler import get_scheduled_register_tasks, add_scheduled_register_task
-    
-    tasks = get_scheduled_register_tasks()
-    if task_id not in tasks:
-        raise HTTPException(404, "任务不存在")
-    
-    task_config = tasks[task_id]
-    task_config['paused'] = not task_config.get('paused', False)
-    add_scheduled_register_task(task_id, task_config)
-    
-    return {"task_id": task_id, "paused": task_config['paused']}
+    return {"task_id": run_task_id, "status": "running"}
 
 @router.post("/schedule")
 def create_scheduled_task(body: RegisterTaskRequest):
@@ -445,17 +441,17 @@ def create_scheduled_task(body: RegisterTaskRequest):
             req = RegisterTaskRequest(**config)
             _run_register(run_task_id, req)
             success = True
-            print(f"[Scheduler] 任务 {task_id} 已执行", flush=True)
+            logger.info(f"任务 {task_id} 已执行")
         except Exception as e:
             error_msg = str(e)
-            print(f"[Scheduler] 任务 {task_id} 执行失败：{e}", flush=True)
+            logger.error(f"任务 {task_id} 执行失败：{e}")
         finally:
             # 更新任务运行状态
             from core.scheduler import update_task_run_status
             update_task_run_status(task_id, success, error_msg)
     
     threading.Thread(target=run_now, daemon=True).start()
-    print(f"[Scheduler] 任务 {task_id} 已创建并启动", flush=True)
+    logger.info(f"任务 {task_id} 已创建并启动")
     
     return {"task_id": task_id, "status": "scheduled", "config": config}
 
@@ -482,13 +478,6 @@ def list_scheduled_tasks():
     
     return {"tasks": result}
 
-
-@router.delete("/schedule/{task_id}")
-def delete_scheduled_task(task_id: str):
-    """删除定时任务"""
-    from core.scheduler import remove_scheduled_register_task
-    remove_scheduled_register_task(task_id)
-    return {"ok": True}
 
 @router.get("/{task_id}")
 def get_task(task_id: str):
@@ -525,14 +514,6 @@ def update_scheduled_task(body: RegisterTaskRequest):
     add_scheduled_register_task(task_id, config)
     
     return {"task_id": task_id, "status": "updated", "config": config}
-
-
-# 手动运行定时任务
-
-
-
-# 暂停/恢复定时任务
-
 
 
 @router.delete("/schedule/{task_id}")

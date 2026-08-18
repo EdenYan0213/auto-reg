@@ -12,6 +12,26 @@ from platforms.chatgpt.chatgpt_registration_mode_adapter import (
 )
 
 
+def _truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _safe_checkout_error(error: Exception, account: Account) -> str:
+    message = " ".join(str(error or "提取 Checkout 链接失败").split())[:240]
+    for value in (
+        account.extra.get("access_token", ""),
+        account.extra.get("refresh_token", ""),
+        account.extra.get("cookies", ""),
+        account.password,
+    ):
+        secret = str(value or "").strip()
+        if secret:
+            message = message.replace(secret, "***")
+    return message or "提取 Checkout 链接失败"
+
+
 @register
 class ChatGPTPlatform(BasePlatform):
     name = "chatgpt"
@@ -21,6 +41,9 @@ class ChatGPTPlatform(BasePlatform):
     def __init__(self, config: RegisterConfig = None, mailbox: BaseMailbox = None):
         super().__init__(config)
         self.mailbox = mailbox
+        # Kept only for task-history diagnostics when registration fails after
+        # the temporary mailbox has been created.  It is not a credential.
+        self.last_registration_email = ""
 
     def check_valid(self, account: Account) -> bool:
         try:
@@ -39,6 +62,7 @@ class ChatGPTPlatform(BasePlatform):
             return False
 
     def register(self, email: str = None, password: str = None) -> Account:
+        self.last_registration_email = str(email or "").strip()
         if not password:
             password = "".join(random.choices(string.ascii_letters + string.digits + "!@#$", k=16))
 
@@ -176,9 +200,88 @@ class ChatGPTPlatform(BasePlatform):
         )
         result = adapter.run(context)
         if not result or not result.success:
+            self.last_registration_email = str(
+                getattr(result, "email", "") or self.last_registration_email or ""
+            ).strip()
             raise RuntimeError(result.error_message if result else "注册失败")
 
-        return adapter.build_account(result, password)
+        self.last_registration_email = str(getattr(result, "email", "") or self.last_registration_email or "").strip()
+        account = adapter.build_account(result, password)
+
+        # Link extraction is intentionally opt-in.  It creates an upstream
+        # checkout session but never completes a purchase.  When enabled, the
+        # account is still returned and saved if link generation fails, with a
+        # durable status visible in the account extra fields.
+        if _truthy(extra_config.get("chatgpt_auto_payment_link")):
+            from platforms.chatgpt.payment import generate_plus_link, generate_team_link
+
+            class _CheckoutAccount:
+                pass
+
+            checkout_account = _CheckoutAccount()
+            checkout_account.access_token = account.extra.get("access_token") or account.token
+            checkout_account.cookies = account.extra.get("cookies", "")
+            plan = str(extra_config.get("chatgpt_payment_plan") or "plus").strip().lower()
+            country = str(extra_config.get("chatgpt_payment_country") or "SG").strip().upper()
+            try:
+                if plan == "team":
+                    link = generate_team_link(
+                        checkout_account,
+                        proxy=proxy,
+                        country=country,
+                    )
+                else:
+                    plan = "plus"
+                    link = generate_plus_link(
+                        checkout_account,
+                        proxy=proxy,
+                        country=country,
+                    )
+                account.extra["cashier_url"] = link
+                account.extra["checkout_link_status"] = "ready"
+                account.extra["checkout_link_plan"] = plan
+                account.extra["checkout_link_country"] = country
+            except Exception as error:
+                account.extra["checkout_link_status"] = "failed"
+                account.extra["checkout_link_plan"] = plan
+                account.extra["checkout_link_country"] = country
+                account.extra["checkout_link_error"] = _safe_checkout_error(error, account)
+
+        return account
+
+    @staticmethod
+    def _token_still_valid(access_token: str) -> bool:
+        """检查 JWT access_token 是否已过期（解析 exp 字段）。"""
+        try:
+            import base64, json, time
+            parts = str(access_token).split(".")
+            if len(parts) < 2:
+                return True
+            payload = parts[1]
+            payload += "=" * (-len(payload) % 4)
+            data = json.loads(base64.urlsafe_b64decode(payload))
+            exp = data.get("exp")
+            if not exp:
+                return True
+            return time.time() < exp - 60
+        except Exception:
+            return True
+
+    def _refresh_access_token(self, account_obj) -> bool:
+        """用 refresh_token 刷新 access_token，更新 account_obj 并返回是否成功。"""
+        try:
+            from platforms.chatgpt.token_refresh import TokenRefreshManager
+            proxy = self.config.proxy if self.config else None
+            manager = TokenRefreshManager(proxy_url=proxy)
+            result = manager.refresh_account(account_obj)
+            if result.success and result.access_token:
+                account_obj.access_token = result.access_token
+                if result.refresh_token:
+                    account_obj.refresh_token = result.refresh_token
+                return True
+        except Exception:
+            pass
+        return False
 
     def get_platform_actions(self) -> list:
         return [
@@ -313,6 +416,13 @@ class ChatGPTPlatform(BasePlatform):
         if action_id == "payment_link":
             from platforms.chatgpt.payment import generate_plus_link, generate_team_link
 
+            # access_token 是短期的，过期后 checkout 接口返回 401。
+            # 先用 refresh_token 刷新，再用新 token 生成支付链接。
+            if not a.access_token or not self._token_still_valid(a.access_token):
+                refreshed = self._refresh_access_token(a)
+                if not refreshed:
+                    return {"ok": False, "error": "access_token 已过期且刷新失败，请先执行「刷新 Token」"}
+
             plan = params.get("plan", "plus")
             country = params.get("country", "US")
             if plan == "plus":
@@ -326,7 +436,7 @@ class ChatGPTPlatform(BasePlatform):
                     proxy=proxy,
                     country=country,
                 )
-            return {"ok": bool(url), "data": {"url": url}}
+            return {"ok": bool(url), "data": {"url": url, "access_token": getattr(a, "access_token", ""), "refresh_token": getattr(a, "refresh_token", "")}}
 
         if action_id == "upload_cpa":
             from platforms.chatgpt.cpa_upload import generate_token_json, upload_to_cpa

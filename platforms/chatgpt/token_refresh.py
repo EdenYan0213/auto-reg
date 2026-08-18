@@ -53,8 +53,11 @@ class TokenRefreshManager:
         """
         self.proxy_url = proxy_url
         from .constants import OAUTH_CLIENT_ID, OAUTH_REDIRECT_URI
+        from .platform_oauth import PLATFORM_OAUTH_CLIENT_ID, PLATFORM_OAUTH_REDIRECT_URI
         self._oauth_client_id = OAUTH_CLIENT_ID
         self._oauth_redirect_uri = OAUTH_REDIRECT_URI
+        self._platform_client_id = PLATFORM_OAUTH_CLIENT_ID
+        self._platform_redirect_uri = PLATFORM_OAUTH_REDIRECT_URI
 
     def _create_session(self) -> cffi_requests.Session:
         """创建 HTTP 会话"""
@@ -151,13 +154,18 @@ class TokenRefreshManager:
 
             # 使用配置的 client_id 或默认值
             client_id = client_id or self._oauth_client_id
+            # Platform OAuth client_id 使用不同的 redirect_uri
+            if client_id == self._platform_client_id:
+                redirect_uri = self._platform_redirect_uri
+            else:
+                redirect_uri = self._oauth_redirect_uri
 
             # 构建请求体
             token_data = {
                 "client_id": client_id,
                 "grant_type": "refresh_token",
                 "refresh_token": refresh_token,
-                "redirect_uri": self._oauth_redirect_uri
+                "redirect_uri": redirect_uri
             }
 
             response = session.post(
@@ -227,11 +235,25 @@ class TokenRefreshManager:
 
         # 尝试 OAuth Refresh Token
         if account.refresh_token:
-            logger.info(f"尝试使用 OAuth Refresh Token 刷新账号 {account.email}")
+            # 新注册的账号使用 Platform OAuth（client_id=app_2SKx...），
+            # 旧的 Codex client_id（app_EMoa...）会导致 401。
+            # 如果 account.client_id 是旧默认值或未设置，用 Platform OAuth 刷新。
+            legacy_client_id = "app_EMoamEEZ73f0CkXaXp7hrann"
+            use_client_id = account.client_id
+            if not use_client_id or use_client_id == legacy_client_id:
+                use_client_id = self._platform_client_id
+            logger.info(f"尝试使用 OAuth Refresh Token 刷新账号 {account.email} (client_id={use_client_id[:12]}...)")
             result = self.refresh_by_oauth_token(
                 refresh_token=account.refresh_token,
-                client_id=account.client_id
+                client_id=use_client_id,
             )
+            # 如果 Platform client_id 失败，再试一次 legacy client_id
+            if not result.success and use_client_id == self._platform_client_id:
+                logger.info("Platform client_id 刷新失败，尝试 legacy client_id")
+                result = self.refresh_by_oauth_token(
+                    refresh_token=account.refresh_token,
+                    client_id=legacy_client_id,
+                )
             return result
 
         # 无可用刷新方式

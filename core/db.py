@@ -4,7 +4,10 @@ from typing import Optional
 from sqlmodel import Field, SQLModel, create_engine, Session, select
 from sqlalchemy import Column, Text
 import json
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 
 def _utcnow():
@@ -63,7 +66,7 @@ class AccountModel(SQLModel, table=True):
     token: str = Field(default="", sa_column=Column(Text))
     status: str = "registered"
     trial_end_time: int = 0
-    cashier_url: str = ""
+    cashier_url: str = Field(default="", sa_column=Column(Text))
     extra_json: str = Field(default="{}", sa_column=Column(Text))   # JSON 存储平台自定义字段
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
@@ -140,6 +143,7 @@ def save_account(account) -> 'AccountModel':
 def init_db():
     SQLModel.metadata.create_all(engine)
     _migrate_account_token_column()
+    _migrate_account_cashier_url_column()
 
 
 def _migrate_account_token_column() -> None:
@@ -157,9 +161,20 @@ def _migrate_account_token_column() -> None:
                 "ALTER TABLE accounts MODIFY COLUMN token TEXT NOT NULL"
             )
     except Exception as exc:
-        # 某些托管数据库账号没有 ALTER 权限；保留启动能力，但把原因明确
-        # 输出，避免后续出现难以定位的“注册成功但保存失败”。
-        print(f"[WARN] accounts.token 扩容迁移失败: {exc}")
+        logger.warning(f"accounts.token 扩容迁移失败: {exc}")
+
+
+def _migrate_account_cashier_url_column() -> None:
+    """将 accounts.cashier_url 扩容为 TEXT（Stripe 完整 URL 含 #fragment 很长）。"""
+    if engine.dialect.name != "mysql":
+        return
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "ALTER TABLE accounts MODIFY COLUMN cashier_url TEXT"
+            )
+    except Exception as exc:
+        logger.warning(f"accounts.cashier_url 扩容迁移失败: {exc}")
 
 
 def get_session():

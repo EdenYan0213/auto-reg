@@ -5,7 +5,6 @@
 import random
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Tuple
 
 
 # ============================================================================
@@ -63,6 +62,7 @@ OPENAI_API_ENDPOINTS = {
     "register": "https://auth.openai.com/api/accounts/user/register",
     "password_verify": "https://auth.openai.com/api/accounts/password/verify",
     "send_otp": "https://auth.openai.com/api/accounts/email-otp/send",
+    "passwordless_send_otp": "https://auth.openai.com/api/accounts/passwordless/send-otp",
     "validate_otp": "https://auth.openai.com/api/accounts/email-otp/validate",
     "create_account": "https://auth.openai.com/api/accounts/create_account",
     "select_workspace": "https://auth.openai.com/api/accounts/workspace/select",

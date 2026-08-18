@@ -91,9 +91,6 @@ def _creationflags() -> int:
 
 
 def _repo_path(name: str) -> Path:
-    if name == "kiro-gateway":
-        # kiro-gateway 固定在 research/kiro/kiro-gateway（本地 clone），不走 _ext_targets
-        return Path(__file__).resolve().parents[1] / "research" / "kiro" / "kiro-gateway"
     return _EXT_ROOT / _SERVICE_META[name]["repo_name"]
 
 
@@ -575,7 +572,7 @@ def _build_command(name: str) -> tuple[list[str], Path]:
     if name == "kiro-gateway":
         python_exe = _venv_python(repo)
         if not python_exe.exists():
-            raise RuntimeError("kiro-gateway 未创建虚拟环境，请先运行 research/kiro/kiro-gateway 的初始化")
+            raise RuntimeError("kiro-gateway 未创建虚拟环境，请先运行 kiro-gateway 的初始化")
         return [str(python_exe), "main.py"], repo
 
     if name == "kiro-manager":

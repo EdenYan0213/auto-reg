@@ -2,7 +2,7 @@ import unittest
 from unittest import mock
 
 from core.base_mailbox import MailboxAccount
-from core.base_platform import RegisterConfig
+from core.base_platform import Account, RegisterConfig
 from platforms.chatgpt.plugin import ChatGPTPlatform
 
 
@@ -57,6 +57,29 @@ class _VerificationAdapter:
         return {"success": True, "password": fallback_password}
 
 
+class _CheckoutAdapter:
+    def run(self, _context):
+        return mock.Mock(success=True)
+
+    def build_account(self, _result, fallback_password):
+        return Account(
+            platform="chatgpt",
+            email="demo@example.com",
+            password=fallback_password,
+            token="access-token",
+            extra={"access_token": "access-token", "cookies": "session=secret"},
+        )
+
+
+class _FailureAdapter:
+    def run(self, _context):
+        return mock.Mock(
+            success=False,
+            email="failed@example.com",
+            error_message="Sentinel 浏览器验证未完成",
+        )
+
+
 class ChatGPTPluginTests(unittest.TestCase):
     def test_custom_provider_rejects_blank_email(self):
         platform = ChatGPTPlatform(
@@ -96,6 +119,50 @@ class ChatGPTPluginTests(unittest.TestCase):
         self.assertEqual(kwargs.get("before_ids"), {"mid-1"})
         self.assertEqual(kwargs.get("otp_sent_at"), 123.0)
         self.assertEqual(kwargs.get("exclude_codes"), {"654321"})
+
+    def test_failed_registration_keeps_generated_email_for_task_history(self):
+        platform = ChatGPTPlatform(
+            config=RegisterConfig(extra={"chatgpt_registration_mode": "refresh_token"}),
+            mailbox=_TrackingMailbox(),
+        )
+
+        with mock.patch(
+            "platforms.chatgpt.plugin.build_chatgpt_registration_mode_adapter",
+            return_value=_FailureAdapter(),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                platform.register()
+
+        self.assertIn("Sentinel 浏览器验证未完成", str(ctx.exception))
+        self.assertEqual(platform.last_registration_email, "failed@example.com")
+
+    def test_auto_checkout_link_is_saved_without_completing_payment(self):
+        platform = ChatGPTPlatform(
+            config=RegisterConfig(
+                extra={
+                    "chatgpt_auto_payment_link": True,
+                    "chatgpt_payment_plan": "plus",
+                    "chatgpt_payment_country": "SG",
+                }
+            ),
+            mailbox=_TrackingMailbox(),
+        )
+
+        with mock.patch(
+            "platforms.chatgpt.plugin.build_chatgpt_registration_mode_adapter",
+            return_value=_CheckoutAdapter(),
+        ), mock.patch(
+            "platforms.chatgpt.payment.generate_plus_link",
+            return_value="https://chatgpt.com/checkout/openai_llc/test-session",
+        ) as generate_link:
+            account = platform.register()
+
+        self.assertEqual(
+            account.extra["cashier_url"],
+            "https://chatgpt.com/checkout/openai_llc/test-session",
+        )
+        self.assertEqual(account.extra["checkout_link_status"], "ready")
+        generate_link.assert_called_once()
 
 
 if __name__ == "__main__":

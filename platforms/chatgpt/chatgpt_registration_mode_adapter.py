@@ -90,7 +90,7 @@ class BaseChatGPTRegistrationModeAdapter(ABC):
         )
 
     def _build_account_extra(self, result) -> dict:
-        return {
+        extra = {
             "access_token": getattr(result, "access_token", ""),
             "refresh_token": getattr(result, "refresh_token", ""),
             "id_token": getattr(result, "id_token", ""),
@@ -100,6 +100,13 @@ class BaseChatGPTRegistrationModeAdapter(ABC):
             "chatgpt_has_refresh_token_solution": self.mode == CHATGPT_REGISTRATION_MODE_REFRESH_TOKEN,
             "chatgpt_token_source": getattr(result, "source", "register"),
         }
+        cookies = str(getattr(result, "cookies", "") or "").strip()
+        if cookies:
+            # Needed by the explicit payment/Checkout action.  It is kept in
+            # account extra and is never written to task logs or to result
+            # summaries.
+            extra["cookies"] = cookies
+        return extra
 
 
 class RefreshTokenChatGPTRegistrationAdapter(BaseChatGPTRegistrationModeAdapter):

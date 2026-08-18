@@ -88,7 +88,7 @@ def _apply_action_result(
         )
     if result.get("ok") and result.get("data", {}) and isinstance(result["data"], dict):
         data = result["data"]
-        tracked_keys = {"access_token", "accessToken", "refreshToken", "clientId", "clientSecret", "webAccessToken"}
+        tracked_keys = {"access_token", "accessToken", "refresh_token", "refreshToken", "clientId", "clientSecret", "webAccessToken"}
         if tracked_keys.intersection(data.keys()):
             extra = acc_model.get_extra()
             extra.update(data)

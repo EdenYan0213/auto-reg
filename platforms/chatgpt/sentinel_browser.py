@@ -65,7 +65,12 @@ def get_sentinel_token_via_browser(
                     kwargs["channel"] = channel
                 else:
                     kwargs.pop("channel", None)
-                logger(f"Sentinel Browser 尝试 launch channel={channel}: {kwargs}")
+                # Do not print the full launch kwargs: a proxy configuration can
+                # contain credentials.  The mode is enough for task diagnostics.
+                logger(
+                    "Sentinel Browser 尝试 launch "
+                    f"channel={channel or 'default'}, headless={bool(kwargs.get('headless'))}"
+                )
                 browser = p.chromium.launch(**kwargs)
                 break
             except Exception as e:
@@ -107,22 +112,33 @@ def get_sentinel_token_via_browser(
                 timeout=min(timeout_ms, 15000),
             )
 
-            result = page.evaluate(
-                """
-                async ({ flow }) => {
-                    try {
-                        const token = await window.SentinelSDK.token(flow);
-                        return { success: true, token };
-                    } catch (e) {
-                        return {
-                            success: false,
-                            error: (e && (e.message || String(e))) || "unknown",
-                        };
+            # The SDK can expose its function before its internal challenge
+            # state is ready.  A short bounded retry handles that race without
+            # falling back to a token generated for a different session.
+            page.wait_for_timeout(1000)
+            result = None
+            for attempt in range(2):
+                result = page.evaluate(
+                    """
+                    async ({ flow }) => {
+                        try {
+                            const token = await window.SentinelSDK.token(flow);
+                            return { success: true, token };
+                        } catch (e) {
+                            return {
+                                success: false,
+                                error: (e && (e.message || String(e))) || "unknown",
+                            };
+                        }
                     }
-                }
-                """,
-                {"flow": flow},
-            )
+                    """,
+                    {"flow": flow},
+                )
+
+                if result and result.get("success") and result.get("token"):
+                    break
+                if attempt == 0:
+                    page.wait_for_timeout(1500)
 
             if not result or not result.get("success") or not result.get("token"):
                 logger(

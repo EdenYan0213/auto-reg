@@ -3,7 +3,6 @@ ChatGPT 注册客户端模块
 使用 curl_cffi 模拟浏览器行为
 """
 
-import os
 import random
 import uuid
 import time
@@ -135,9 +134,10 @@ class ChatGPTClient:
     def _get_sentinel_token(self, flow: str, *, page_url: str | None = None):
         prefer_browser = flow in {"username_password_create", "oauth_create_account"}
         if prefer_browser:
-            # 服务器无 XServer，必须强制 headless
-            has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
-            force_headless = not has_display
+            # These flows are tied to the browser challenge/session.  An HTTP
+            # fallback can produce a token that the password/account request
+            # rejects as a mismatched session, so fail clearly instead.
+            force_headless = self.browser_mode != "headed"
             token = get_sentinel_token_via_browser(
                 flow=flow,
                 proxy=self.proxy,
@@ -149,6 +149,8 @@ class ChatGPTClient:
             if token:
                 self._log(f"{flow}: 已通过 Playwright SentinelSDK 获取 token")
                 return token
+            self._log(f"{flow}: 浏览器 Sentinel 验证未完成，不使用 HTTP PoW 降级")
+            return None
 
         token = build_sentinel_token(
             self.session,
@@ -644,8 +646,11 @@ class ChatGPTClient:
             "username_password_create",
             page_url=f"{self.AUTH}/create-account/password",
         )
-        if sentinel_token:
-            headers["openai-sentinel-token"] = sentinel_token
+        if not sentinel_token:
+            message = "Sentinel 浏览器验证未完成，未提交注册请求"
+            self._log(message)
+            return False, message
+        headers["openai-sentinel-token"] = sentinel_token
 
         payload = {
             "username": email,
@@ -767,7 +772,9 @@ class ChatGPTClient:
         if sentinel_token:
             self._log("create_account: 已生成 sentinel token")
         else:
-            self._log("create_account: 未生成 sentinel token，降级继续请求")
+            message = "create_account: Sentinel 浏览器验证未完成，未提交账号创建请求"
+            self._log(message)
+            return (False, message) if return_state else (False, message)
 
         headers = self._headers(
             url,

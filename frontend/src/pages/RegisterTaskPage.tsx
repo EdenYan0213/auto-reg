@@ -96,6 +96,9 @@ export default function RegisterTaskPage() {
         codex_proxy_upload_type: cfg.codex_proxy_upload_type || 'at',
         team_manager_url: cfg.team_manager_url || '',
         team_manager_key: cfg.team_manager_key || '',
+        chatgpt_auto_payment_link: parseBooleanConfigValue(cfg.chatgpt_auto_payment_link, true),
+        chatgpt_payment_plan: cfg.chatgpt_payment_plan || 'plus',
+        chatgpt_payment_country: cfg.chatgpt_payment_country || 'SG',
       })
     })
   }, [form])
@@ -159,6 +162,9 @@ export default function RegisterTaskPage() {
       codex_proxy_upload_type: values.codex_proxy_upload_type,
       team_manager_url: values.team_manager_url,
       team_manager_key: values.team_manager_key,
+      chatgpt_auto_payment_link: values.chatgpt_auto_payment_link,
+      chatgpt_payment_plan: values.chatgpt_payment_plan,
+      chatgpt_payment_country: values.chatgpt_payment_country,
     }
     const chatgptRegistrationRequestAdapter =
       buildChatGPTRegistrationRequestAdapter(
@@ -285,6 +291,31 @@ export default function RegisterTaskPage() {
                 onChange={setChatgptRegistrationMode}
               />
             </Form.Item>
+          )}
+          {platform === 'chatgpt' && (
+            <Card size="small" title="注册后提取 Checkout 链接" style={{ marginBottom: 16 }}>
+              <Form.Item
+                name="chatgpt_auto_payment_link"
+                valuePropName="checked"
+                style={{ marginBottom: 8 }}
+              >
+                <Checkbox>注册成功后自动生成升级链接（不自动支付）</Checkbox>
+              </Form.Item>
+              <Space style={{ width: '100%' }}>
+                <Form.Item name="chatgpt_payment_plan" label="套餐" style={{ flex: 1 }}>
+                  <Select options={[{ value: 'plus', label: 'Plus' }, { value: 'team', label: 'Team' }]} />
+                </Form.Item>
+                <Form.Item name="chatgpt_payment_country" label="地区" style={{ flex: 1 }}>
+                  <Select
+                    options={['SG', 'US', 'TR', 'JP', 'HK', 'GB', 'AU', 'CA'].map((value) => ({
+                      value,
+                      label: value,
+                    }))}
+                  />
+                </Form.Item>
+              </Space>
+              <Text type="secondary">开启后只创建 Checkout 会话链接；链接会和账号一起保存到管理页面。</Text>
+            </Card>
           )}
         </Card>
 

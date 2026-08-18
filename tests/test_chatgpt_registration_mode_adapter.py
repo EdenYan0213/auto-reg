@@ -40,6 +40,7 @@ class ChatGPTRegistrationModeAdapterTests(unittest.TestCase):
                 "refresh_token": "",
                 "id_token": "id-demo",
                 "session_token": "session-demo",
+                "cookies": "__Secure-next-auth.session-token=session-demo",
                 "workspace_id": "ws-demo",
                 "source": "register",
             },
@@ -54,6 +55,10 @@ class ChatGPTRegistrationModeAdapterTests(unittest.TestCase):
             CHATGPT_REGISTRATION_MODE_ACCESS_TOKEN_ONLY,
         )
         self.assertFalse(account.extra["chatgpt_has_refresh_token_solution"])
+        self.assertEqual(
+            account.extra["cookies"],
+            "__Secure-next-auth.session-token=session-demo",
+        )
 
     def test_access_token_only_adapter_passes_runtime_context_to_engine(self):
         created = {}

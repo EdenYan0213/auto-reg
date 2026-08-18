@@ -10,6 +10,7 @@ from typing import Optional, Callable
 
 from core.task_runtime import TaskInterruption
 from platforms.chatgpt.refresh_token_registration_engine import RegistrationResult
+from platforms.chatgpt.platform_oauth import serialize_chatgpt_cookie_header
 
 from .chatgpt_client import ChatGPTClient
 from .utils import generate_random_name, generate_random_birthday
@@ -160,7 +161,10 @@ class AccessTokenOnlyRegistrationEngine:
                         self._log("Token 提取完成！")
                         result.success = True
                         result.access_token = session_result.get("access_token", "")
+                        result.refresh_token = session_result.get("refresh_token", "")
+                        result.id_token = session_result.get("id_token", "")
                         result.session_token = session_result.get("session_token", "")
+                        result.cookies = serialize_chatgpt_cookie_header(chatgpt_client.session)
                         result.account_id = (
                             session_result.get("account_id")
                             or session_result.get("user_id")
