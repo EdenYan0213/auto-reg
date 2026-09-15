@@ -1765,6 +1765,8 @@ class CFWorkerMailbox(BaseMailbox):
     def _pick_domain(self) -> str:
         if self.domain_override:
             return self.domain_override
+        if self.domain:
+            return self.domain
         if self.enabled_domains:
             return random.choice(self.enabled_domains)
         return self.domain
