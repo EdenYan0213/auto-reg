@@ -29,7 +29,7 @@ class OpenBlockLabsPlatform(BasePlatform):
 
         extra = self.config.extra or {}
         registration_mode = str(
-            extra.get("openblocklabs_registration_mode") or "browser"
+            extra.get("openblocklabs_registration_mode") or "protocol"
         ).strip().lower()
         if registration_mode in {"browser", "playwright", "headless", "headed"}:
             if not self.mailbox or not mail_acct:

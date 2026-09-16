@@ -157,6 +157,7 @@ class OpenBlockLabsBrowserRegister:
         return (
             f"{AUTH_BASE}/?client_id={CLIENT_ID}"
             f"&redirect_uri={quote(DASHBOARD_CALLBACK, safe='')}"
+            f"&screen_hint=signup"
         )
 
     @staticmethod
@@ -223,7 +224,20 @@ class OpenBlockLabsBrowserRegister:
                 "邮箱表单",
             )
 
-            signup_link, _ = self._visible(page, ['a[href*="/sign-up"]'])
+            signup_link, _ = self._visible(
+                page,
+                [
+                    'a[href*="/sign-up"]',
+                    'a[href*="/signup"]',
+                    'a:has-text("Sign up")',
+                    'a:has-text("Create an account")',
+                    'a:has-text("Create account")',
+                    'button:has-text("Sign up")',
+                    'button:has-text("Create an account")',
+                    '[data-testid*="signup"]',
+                    '[data-testid*="sign-up"]',
+                ],
+            )
             if signup_link:
                 signup_link.click(timeout=10000)
             else:

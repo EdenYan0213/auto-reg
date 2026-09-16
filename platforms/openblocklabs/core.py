@@ -17,9 +17,250 @@ pip install curl_cffi requests
 
 import re, json, time, base64, random, string, os
 from urllib.parse import urlencode, urlparse, parse_qs, quote, urljoin
-from curl_cffi import requests as curl_requests
+import subprocess, tempfile
 import requests as std_requests
 from core.proxy_utils import build_requests_proxy_config
+
+# ─── Curl subprocess wrapper (bypasses Cloudflare TLS fingerprint) ───────────
+
+CURL_BIN = "/usr/bin/curl"
+
+
+class _CurlCookie:
+    """Mimics requests cookie with .name / .value attributes."""
+    def __init__(self, name: str, value: str):
+        self.name = name
+        self.value = value
+
+
+class _CurlCookieJar:
+    """Iterable cookie jar backed by a curl cookie file."""
+    def __init__(self, cookie_path: str):
+        self._path = cookie_path
+        self._cookies: list[_CurlCookie] = []
+
+    def _parse(self):
+        """Re-read Netscape cookie file after each request."""
+        self._cookies.clear()
+        try:
+            with open(self._path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split("\t")
+                    if len(parts) >= 7:
+                        self._cookies.append(_CurlCookie(parts[5], parts[6]))
+        except FileNotFoundError:
+            pass
+
+    def __iter__(self):
+        self._parse()
+        return iter(self._cookies)
+
+
+class CurlResponse:
+    """Minimal response object matching the interface used in core.py."""
+    def __init__(self, status_code: int, text: str, url: str,
+                 headers: dict, history: list = None):
+        self.status_code = status_code
+        self.text = text
+        self.url = url
+        self.headers = headers
+        self.history = history or []
+
+    @property
+    def ok(self):
+        return 200 <= self.status_code < 400
+
+
+class CurlSession:
+    """
+    Drop-in replacement for curl_cffi.requests.Session.
+    Delegates to /usr/bin/curl via subprocess, bypassing TLS fingerprint detection.
+    Cookie state persists via a temporary Netscape cookie file.
+    """
+    def __init__(self, proxy: str = None):
+        self._cookie_file = tempfile.NamedTemporaryFile(
+            suffix=".txt", prefix="curl_cookies_", delete=False
+        ).name
+        self.cookies = _CurlCookieJar(self._cookie_file)
+        self.headers: dict = {}
+        self.proxies: dict = {}
+
+    def get(self, url: str, params: dict = None, headers: dict = None,
+            allow_redirects: bool = True) -> CurlResponse:
+        if params:
+            qs = "&".join(f"{k}={v}" for k, v in params.items())
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}{qs}"
+        return self._request("GET", url, headers=headers,
+                             allow_redirects=allow_redirects)
+
+    def post(self, url: str, data: bytes = None, headers: dict = None,
+             allow_redirects: bool = False) -> CurlResponse:
+        return self._request("POST", url, data=data, headers=headers,
+                             allow_redirects=allow_redirects)
+
+    def _request(self, method: str, url: str, data: bytes = None,
+                 headers: dict = None, allow_redirects: bool = True) -> CurlResponse:
+        cmd = [
+            CURL_BIN, "-s", "-S",
+            "-w", "\n%{http_code}",
+            "-b", self._cookie_file,
+            "-c", self._cookie_file,
+            "-A", self.headers.get("user-agent", "Mozilla/5.0"),
+        ]
+
+        if not allow_redirects:
+            cmd += ["--max-redirs", "0"]
+        else:
+            cmd += ["-L", "--max-redirs", "10"]
+
+        # Proxy
+        proxy_url = self.proxies.get("https") or self.proxies.get("http")
+        if proxy_url:
+            cmd += ["--proxy", proxy_url]
+
+        # Merge headers
+        merged = {**self.headers}
+        if headers:
+            merged.update(headers)
+        for k, v in merged.items():
+            if k.lower() == "user-agent":
+                continue  # already set via -A
+            cmd += ["-H", f"{k}: {v}"]
+
+        # Use -v to capture ALL intermediate redirect headers in stderr.
+        # -D only dumps the FINAL response headers; -v logs every hop.
+        cmd += ["-v"]
+
+        data_file = None
+        if method == "POST" and data is not None:
+            data_file = self._write_data(data)
+            cmd += ["--data-binary", f"@{data_file}"]
+
+        cmd.append(url)
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            if data_file:
+                try:
+                    os.unlink(data_file)
+                except OSError:
+                    pass
+            return CurlResponse(0, "", url, {})
+
+        output = result.stdout
+        # Split body and status code (last line after \n)
+        lines = output.rsplit("\n", 1)
+        if len(lines) == 2:
+            body, code_str = lines
+            try:
+                status_code = int(code_str.strip())
+            except ValueError:
+                body = output
+                status_code = 0
+        else:
+            body = output
+            status_code = 0
+
+        # Parse ALL response headers from -v stderr to build redirect history.
+        # curl -v outputs blocks like:
+        #   < HTTP/1.1 307 Temporary Redirect
+        #   < Location: https://auth.example.com/sign-up?authorization_session_id=...
+        #   < set-cookie: ...
+        # Each block starts with "< " lines after a "> " request block.
+        history: list[CurlResponse] = []
+        resp_headers: dict = {}
+        current_headers: dict = {}
+        current_status = 0
+
+        def _flush_block():
+            """Flush the current header block into history."""
+            nonlocal current_headers, current_status
+            if current_status and current_headers:
+                # Skip the very last block (it's the final response, handled separately)
+                block_url = current_headers.pop("_curl_redirect_url", url)
+                history.append(CurlResponse(current_status, "", block_url, dict(current_headers)))
+            current_headers = {}
+            current_status = 0
+
+        for line in result.stderr.splitlines():
+            # Request line: "> GET /path HTTP/1.1" — marks a new hop
+            if line.startswith("> ") and ("GET " in line or "POST " in line or "HEAD " in line):
+                _flush_block()
+                continue
+            # Response status: "< HTTP/1.1 307 Temporary Redirect"
+            if line.startswith("< HTTP/") or line.startswith("< HTTP\\"):
+                _flush_block()
+                parts = line.split(None, 2)
+                if len(parts) >= 2:
+                    try:
+                        current_status = int(parts[1])
+                    except ValueError:
+                        pass
+                continue
+            # Header line: "< key: value"
+            if line.startswith("< ") and ":" in line[2:]:
+                key, _, val = line[2:].partition(":")
+                current_headers[key.strip().lower()] = val.strip()
+                continue
+            # Track redirect URL from curl info lines
+            # "  Trying ip:port..."
+            # "  Connected to ... "
+            # "  Location: ..." is already captured above as header
+            # "  > GET /next HTTP/1.1" marks the redirected request
+            # Also capture the URL curl is connecting to
+            if "Connected to" in line or "Trying" in line:
+                continue
+            # curl sometimes prints: "< location: ..." (lowercase) — already handled
+
+        # Flush the last intermediate block (before final response)
+        _flush_block()
+
+        # The FINAL response headers come from the last "< " block in stderr
+        # which we just flushed. But actually the final response headers are in
+        # the last block. Let's re-parse: the last block IS the final response.
+        # Reconstruct final response headers from the last block in stderr.
+        if history:
+            last_intermediate = history[-1]
+            # If the last flushed block has the same status as the final response,
+            # it's actually the final response — pop it from history.
+            if last_intermediate.status_code == status_code:
+                resp_headers = last_intermediate.headers
+                history.pop()
+            else:
+                resp_headers = current_headers if current_headers else {}
+        else:
+            resp_headers = current_headers if current_headers else {}
+
+        # Clean up temp files
+        if data_file:
+            try:
+                os.unlink(data_file)
+            except OSError:
+                pass
+
+        return CurlResponse(status_code, body, url, resp_headers, history=history)
+
+    def _write_data(self, data: bytes) -> str:
+        """Write POST body to a temp file, return path."""
+        f = tempfile.NamedTemporaryFile(suffix=".dat", prefix="curl_post_", delete=False)
+        try:
+            f.write(data)
+            return f.name
+        finally:
+            f.close()
+            # NOTE: file is NOT unlinked here — caller must unlink after curl runs
+
+    def close(self):
+        try:
+            os.unlink(self._cookie_file)
+        except OSError:
+            pass
+
 
 # ─── 配置 ───────────────────────────────────────────────────────────────────
 
@@ -100,8 +341,9 @@ def _make_signals() -> str:
 # ─── Register ────────────────────────────────────────────────────────────────
 class OpenBlockLabsRegister:
     def __init__(self, proxy: str = None):
-        self.s = curl_requests.Session()
-        self.s.impersonate = "chrome131"
+        self.s = CurlSession(proxy=proxy)
+        # Impersonation detected by Cloudflare → 404 on /sign-up.
+        # Plain TLS (no impersonate) works as regular curl does.
         if proxy:
             self.s.proxies = build_requests_proxy_config(proxy)
         self.s.headers.update(
@@ -121,12 +363,16 @@ class OpenBlockLabsRegister:
         h = {
             "accept": accept
             or "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "origin": AUTH_BASE,
+            "referer": referer or f"{AUTH_BASE}/",
             "sec-ch-ua": '"Not:A-Brand";v="99", "Google Chrome";v="131", "Chromium";v="131"',
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": '"macOS"',
+            "sec-fetch-dest": "document",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-site": "same-origin",
+            "sec-fetch-user": "?1",
         }
-        if referer:
-            h["referer"] = referer
         return h
 
     def _extract_action_id(self, text: str) -> str:
@@ -228,17 +474,12 @@ class OpenBlockLabsRegister:
     def step1_initiate_signup(self) -> bool:
         """GET auth.openblocklabs.com/sign-up → authorization_session_id + action ID"""
         self.log("Step1: GET /sign-up")
-        for attempt in range(5):
-            r = self.s.get(
-                f"{AUTH_BASE}/sign-up",
-                params={"redirect_uri": DASHBOARD_CALLBACK},
-                headers=self._get_headers(),
-                allow_redirects=True,
-            )
-            if r.status_code == 200:
-                break
-            self.log(f"  CF拦截 (status={r.status_code}), 重试 {attempt + 1}/5...")
-            time.sleep(2)
+        r = self.s.get(
+            f"{AUTH_BASE}/sign-up",
+            params={"redirect_uri": DASHBOARD_CALLBACK},
+            headers=self._get_headers(),
+            allow_redirects=True,
+        )
         final_url = str(r.url)
         parsed = urlparse(final_url)
         qs = parse_qs(parsed.query)
@@ -309,7 +550,8 @@ class OpenBlockLabsRegister:
         if action:
             self._action_id = action
             self.log(f"  action={action[:16]}...")
-        return r.status_code == 200
+        # WorkOS returns 404 even on success; action ID is the real signal
+        return r.status_code in (200, 404) and action is not None
 
     def step5_submit_password(
         self, email: str, password: str, first_name: str, last_name: str
@@ -366,7 +608,7 @@ class OpenBlockLabsRegister:
         if action:
             self._action_id = action
             self.log(f"  action={action[:16]}...")
-        return r.status_code == 200
+        return r.status_code in (200, 404) and action is not None
 
     def step7_submit_otp(self, email: str, code: str, pending_auth_token: str) -> str:
         """POST /email-verification → 303 → dashboard/auth/callback?code=..."""
@@ -447,7 +689,7 @@ class OpenBlockLabsRegister:
             allow_redirects=True,
         )
         self.log(f"  -> {r.status_code} final={str(r.url)[:80]}")
-        return r.status_code == 200
+        return r.status_code in (200, 404)
 
     def register(
         self,
